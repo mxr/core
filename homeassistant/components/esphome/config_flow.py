@@ -24,8 +24,10 @@ from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers.device_registry import format_mac
 
 from . import CONF_NOISE_PSK, DOMAIN
+from .dashboard import async_get_dashboard
 
 ERROR_REQUIRES_ENCRYPTION_KEY = "requires_encryption_key"
+ERROR_INVALID_ENCRYPTION_KEY = "invalid_psk"
 ESPHOME_URL = "https://esphome.io/"
 
 
@@ -42,6 +44,7 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
         self._noise_psk: str | None = None
         self._device_info: DeviceInfo | None = None
         self._reauth_entry: ConfigEntry | None = None
+        self._config_file: str | None = None
 
     async def _async_step_user_base(
         self, user_input: dict[str, Any] | None = None, error: str | None = None
@@ -81,6 +84,12 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
         self._port = entry.data[CONF_PORT]
         self._password = entry.data[CONF_PASSWORD]
         self._name = entry.title
+
+        if await self._retrieve_encryption_key_from_dashboard():
+            error = await self.fetch_device_info()
+            if error is None:
+                return await self._async_authenticate_or_add()
+
         return await self.async_step_reauth_confirm()
 
     async def async_step_reauth_confirm(
@@ -114,6 +123,17 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
 
     async def _async_try_fetch_device_info(self) -> FlowResult:
         error = await self.fetch_device_info()
+
+        if (
+            error == ERROR_REQUIRES_ENCRYPTION_KEY
+            and await self._retrieve_encryption_key_from_dashboard()
+        ):
+            error = await self.fetch_device_info()
+            # If the fetched key is invalid, unset it again.
+            if error == ERROR_INVALID_ENCRYPTION_KEY:
+                self._noise_psk = None
+                error = ERROR_REQUIRES_ENCRYPTION_KEY
+
         if error == ERROR_REQUIRES_ENCRYPTION_KEY:
             return await self.async_step_encryption_key()
         if error is not None:
@@ -154,6 +174,7 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
 
         # Hostname is format: livingroom.local.
         self._name = discovery_info.hostname[: -len(".local.")]
+        self._config_file = f"{self._name}.yaml"
         self._host = discovery_info.host
         self._port = discovery_info.port
 
@@ -206,7 +227,6 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
         """Handle getting psk for transport encryption."""
         errors = {}
         if user_input is not None:
-            self._noise_psk = user_input[CONF_NOISE_PSK]
             error = await self.fetch_device_info()
             if error is None:
                 return await self._async_authenticate_or_add()
@@ -260,7 +280,7 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
         except RequiresEncryptionAPIError:
             return ERROR_REQUIRES_ENCRYPTION_KEY
         except InvalidEncryptionKeyAPIError:
-            return "invalid_psk"
+            return ERROR_INVALID_ENCRYPTION_KEY
         except ResolveAPIError:
             return "resolve_error"
         except APIConnectionError:
@@ -302,3 +322,20 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
             await cli.disconnect(force=True)
 
         return None
+
+    async def _retrieve_encryption_key_from_dashboard(self) -> bool:
+        """Try to retrieve the encryption key from the dashboard.
+
+        Return boolean if a key was retrieved.
+        """
+        if self._config_file is None:
+            return False
+
+        if (dashboard := async_get_dashboard(self.hass)) is None:
+            return False
+
+        if noise_psk := await dashboard.get_encryption_key(self._config_file):
+            self._noise_psk = noise_psk
+            return True
+
+        return False
