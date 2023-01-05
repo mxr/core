@@ -54,9 +54,11 @@ class SelectableCapapility(MusicCastCapabilityEntity, SelectEntity):
     @property
     def options(self) -> list[str]:
         """Return the list possible options."""
-        return list(self.capability.options.values())
+        return [value.replace(" ", "_") for value in self.capability.options.values()]
 
     @property
     def current_option(self) -> str | None:
         """Return the currently selected option."""
-        return self.capability.options.get(self.capability.current)
+        if (value := self.capability.current) is not None:
+            return value.replace(" ", "_")
+        return None
