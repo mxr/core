@@ -53,18 +53,13 @@ ATTR_UID = "uid"
 CONF_NETWORK = "network"
 CONF_STATIONS_LIST = "stations"
 
-DEFAULT_ENDPOINT = "https://api.citybik.es/{uri}"
 PLATFORM = "citybikes"
 
 MONITORED_NETWORKS = "monitored-networks"
 
-NETWORKS_URI = "v2/networks"
-
 REQUEST_TIMEOUT = 5  # In seconds; argument to asyncio.timeout
 
 SCAN_INTERVAL = timedelta(minutes=5)  # Timely, and doesn't suffocate the API
-
-STATIONS_URI = "v2/networks/{uid}?fields=network.stations"
 
 CITYBIKES_ATTRIBUTION = (
     "Information provided by the CityBikes Project (https://citybik.es/#about)"
