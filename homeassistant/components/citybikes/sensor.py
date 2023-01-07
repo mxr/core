@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 from datetime import timedelta
 import logging
-from typing import Any, Generic, TypeVar, Union
+from typing import Generic, TypeVar, Union
 
 import aiohttp
 import async_timeout
@@ -30,6 +30,7 @@ from homeassistant.const import (
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import PlatformNotReady
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.entity import async_generate_entity_id
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -83,11 +84,6 @@ PLATFORM_SCHEMA = vol.All(
     ),
 )
 
-
-class CityBikesRequestError(Exception):
-    """Error to indicate a CityBikes API request has failed."""
-
-
 Resource = TypeVar(
     "Resource", bound=Union[dict[str, citybikes.Network], dict[str, citybikes.Station]]
 )
@@ -96,20 +92,25 @@ Resource = TypeVar(
 class Fetcher(Generic[Resource]):
     """An interface for making a call to the CityBikes API with a timeout."""
 
-    async def fetch(self) -> Resource:
+    async def fetch(self, hass: HomeAssistant) -> Resource:
         """Perform a request to CityBikes API endpoint, and parse the response."""
         try:
+            session = async_get_clientsession(hass)
             async with async_timeout.timeout(REQUEST_TIMEOUT):
-                return await self.fetch_impl()
+                return await self.fetch_impl(session)
         except (asyncio.TimeoutError, aiohttp.ClientError):
             _LOGGER.error("Could not connect to CityBikes API endpoint")
         except ValueError:
             _LOGGER.error("Received non-JSON data from CityBikes API endpoint")
         raise CityBikesRequestError
 
-    async def fetch_impl(self) -> Resource:
+    async def fetch_impl(self, session: aiohttp.ClientSession) -> Resource:
         """Make a CityBikes API request (must be implemented by children)."""
         raise NotImplementedError()
+
+
+class CityBikesRequestError(Exception):
+    """Error to indicate a CityBikes API request has failed."""
 
 
 class NetworksFetcher(Fetcher):
@@ -119,8 +120,11 @@ class NetworksFetcher(Fetcher):
         """Initialize the NetworksFetcher."""
         self.client = client
 
-    async def fetch_impl(self) -> dict[str, citybikes.Network]:
+    async def fetch_impl(
+        self, session: aiohttp.ClientSession
+    ) -> dict[str, citybikes.Network]:
         """Refresh networks."""
+        self.client.session = session
         self.client.networks.request()
         return {n[ATTR_ID]: n for n in self.client.networks}
 
@@ -132,8 +136,11 @@ class StationFetcher(Fetcher):
         """Initialize the StationFetcher."""
         self.network = network
 
-    async def fetch_impl(self) -> Any:
+    async def fetch_impl(
+        self, session: aiohttp.ClientSession
+    ) -> dict[str, citybikes.Station]:
         """Refresh stations on the network."""
+        self.network.stations.client.session = session
         self.network.stations.request()
         return {s[ATTR_ID]: s for s in self.network.stations}
 
@@ -162,15 +169,19 @@ async def async_setup_platform(
     citybikes_client = citybikes.Client()
 
     # Create a single instance of CityBikesNetworks.
-    networks = hass.data.setdefault(
-        CITYBIKES_NETWORKS, CityBikesNetworks(citybikes_client)
+    citybikes_networks = hass.data.setdefault(
+        CITYBIKES_NETWORKS, CityBikesNetworks(hass, citybikes_client)
     )
 
     if not network_id:
-        network_id = await networks.get_closest_network_id(latitude, longitude)
+        network_id = await citybikes_networks.get_closest_network_id(
+            latitude, longitude
+        )
 
     if network_id not in hass.data[PLATFORM][MONITORED_NETWORKS]:
-        network = CityBikesNetwork(citybikes_client, networks[network_id])
+        network = CityBikesNetwork(
+            hass, citybikes_client, citybikes_networks.networks[network_id]
+        )
         hass.data[PLATFORM][MONITORED_NETWORKS][network_id] = network
         hass.async_create_task(network.async_refresh())
         async_track_time_interval(hass, network.async_refresh, SCAN_INTERVAL)
@@ -200,8 +211,9 @@ async def async_setup_platform(
 class CityBikesNetworks:
     """Represent all CityBikes networks."""
 
-    def __init__(self, client: citybikes.Client) -> None:
+    def __init__(self, hass: HomeAssistant, client: citybikes.Client) -> None:
         """Initialize the networks instance."""
+        self.hass = hass
         self.client = client
         self.networks = None
         self.networks_loading = asyncio.Condition()
@@ -211,7 +223,7 @@ class CityBikesNetworks:
         try:
             await self.networks_loading.acquire()
             if self.networks is None:
-                self.networks = await NetworksFetcher(self.client).fetch()
+                self.networks = await NetworksFetcher(self.client).fetch(self.hass)
             result = None
             minimum_dist = None
             for network_id, network in self.networks.items():
@@ -234,8 +246,11 @@ class CityBikesNetworks:
 class CityBikesNetwork:
     """Thin wrapper around a CityBikes network object."""
 
-    def __init__(self, client: citybikes.Client, network: citybikes.Network) -> None:
+    def __init__(
+        self, hass: HomeAssistant, client: citybikes.Client, network: citybikes.Network
+    ) -> None:
         """Initialize the network object."""
+        self.hass = hass
         self.client = client
         self.network = network
         self.stations: dict[str, citybikes.Station] = {}
@@ -244,7 +259,7 @@ class CityBikesNetwork:
     async def async_refresh(self, now=None):
         """Refresh the state of the network."""
         try:
-            self.stations = await StationFetcher(self.network).fetch()
+            self.stations = await StationFetcher(self.network).fetch(self.hass)
             self.ready.set()
         except CityBikesRequestError as err:
             if now is not None:
