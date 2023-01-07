@@ -91,29 +91,7 @@ PLATFORM_SCHEMA = vol.All(
 
 
 
-STATION_SCHEMA = vol.Schema(
-    {
-        vol.Required(ATTR_FREE_BIKES): cv.positive_int,
-        vol.Required(ATTR_EMPTY_SLOTS): vol.Any(cv.positive_int, None),
-        vol.Required(ATTR_LATITUDE): cv.latitude,
-        vol.Required(ATTR_LONGITUDE): cv.longitude,
-        vol.Required(ATTR_ID): cv.string,
-        vol.Required(ATTR_NAME): cv.string,
-        vol.Required(ATTR_TIMESTAMP): cv.string,
-        vol.Optional(ATTR_EXTRA): vol.Schema(
-            {vol.Optional(ATTR_UID): cv.string}, extra=vol.REMOVE_EXTRA
-        ),
-    },
-    extra=vol.REMOVE_EXTRA,
-)
 
-STATIONS_RESPONSE_SCHEMA = vol.Schema(
-    {
-        vol.Required(ATTR_NETWORK): vol.Schema(
-            {vol.Required(ATTR_STATIONS_LIST): [STATION_SCHEMA]}, extra=vol.REMOVE_EXTRA
-        )
-    }
-)
 
 
 class CityBikesRequestError(Exception):
@@ -149,7 +127,7 @@ class StationFetcher(Fetcher):
         self.network = network
 
     async def fetch_impl(self) -> dict[str, citybikes.Station]:
-        return {s[ATTR_UID]:s for s in self.network.stations.request()}
+        return {s[ATTR_ID]:s for s in self.network.stations.request()}
 
 
 async def async_setup_platform(
@@ -177,13 +155,12 @@ async def async_setup_platform(
 
     # Create a single instance of CityBikesNetworks.
     networks = hass.data.setdefault(CITYBIKES_NETWORKS, CityBikesNetworks( citybikes_client))
-    networks_by_id = {networks[ATTR_ID]:network for network in networks[ATTR_NETWORKS_LIST]}
 
     if not network_id:
         network_id = await networks.get_closest_network_id(latitude, longitude)
 
     if network_id not in hass.data[PLATFORM][MONITORED_NETWORKS]:
-        network = CityBikesNetwork(citybikes_client, networks_by_id[network_id])
+        network = CityBikesNetwork(citybikes_client, networks[network_id])
         hass.data[PLATFORM][MONITORED_NETWORKS][network_id] = network
         hass.async_create_task(network.async_refresh())
         async_track_time_interval(hass, network.async_refresh, SCAN_INTERVAL)
@@ -193,11 +170,10 @@ async def async_setup_platform(
     await network.ready.wait()
 
     devices = []
-    for station in network.stations:
+    for station_id, station in network.stations.items():
         dist = location.distance(
             latitude, longitude, station[ATTR_LATITUDE], station[ATTR_LONGITUDE]
         )
-        station_id = station[ATTR_ID]
         station_uid = str(station.get(ATTR_EXTRA, {}).get(ATTR_UID, ""))
 
         if radius > dist or stations_list.intersection((station_id, station_uid)):
@@ -206,7 +182,7 @@ async def async_setup_platform(
             else:
                 uid = "_".join([network.network_id, station_id])
             entity_id = async_generate_entity_id(ENTITY_ID_FORMAT, uid, hass=hass)
-            devices.append(CityBikesStation(network, station_id, entity_id))
+            devices.append(CityBikesStation(network, station, entity_id))
 
     async_add_entities(devices, True)
 
@@ -214,7 +190,7 @@ async def async_setup_platform(
 class CityBikesNetworks:
     """Represent all CityBikes networks."""
 
-    def __init__(self,  client: citybikes.Client):
+    def __init__(self,  client: citybikes.Client)->None:
         """Initialize the networks instance."""
         self.client = client
         self.networks = None
@@ -252,15 +228,13 @@ class CityBikesNetwork:
         """Initialize the network object."""
         self.client = client
         self.network = network
-        self.stations = []
+        self.stations = {}
         self.ready = asyncio.Event()
 
     async def async_refresh(self, now=None):
         """Refresh the state of the network."""
         try:
-            network = await async_citybikes_request(
-            )
-            self.stations = network[ATTR_NETWORK][ATTR_STATIONS_LIST]
+            self.stations = await StationFetcher(self.network).fetch()
             self.ready.set()
         except CityBikesRequestError as err:
             if now is not None:
@@ -276,24 +250,20 @@ class CityBikesStation(SensorEntity):
     _attr_native_unit_of_measurement = "bikes"
     _attr_icon = "mdi:bike"
 
-    def __init__(self, network, station_id, entity_id):
+    def __init__(self, network, station, entity_id):
         """Initialize the sensor."""
         self._network = network
-        self._station_id = station_id
+        self._station = station
         self.entity_id = entity_id
 
     async def async_update(self) -> None:
         """Update station state."""
-        for station in self._network.stations:
-            if station[ATTR_ID] == self._station_id:
-                station_data = station
-                break
-        self._attr_name = station_data.get(ATTR_NAME)
-        self._attr_native_value = station_data.get(ATTR_FREE_BIKES)
+        self._attr_name = self._station.get(ATTR_NAME)
+        self._attr_native_value = self._station.get(ATTR_FREE_BIKES)
         self._attr_extra_state_attributes = {
-            ATTR_UID: station_data.get(ATTR_EXTRA, {}).get(ATTR_UID),
-            ATTR_LATITUDE: station_data.get(ATTR_LATITUDE),
-            ATTR_LONGITUDE: station_data.get(ATTR_LONGITUDE),
-            ATTR_EMPTY_SLOTS: station_data.get(ATTR_EMPTY_SLOTS),
-            ATTR_TIMESTAMP: station_data.get(ATTR_TIMESTAMP),
+            ATTR_UID: self._station.get(ATTR_EXTRA, {}).get(ATTR_UID),
+            ATTR_LATITUDE: self._station.get(ATTR_LATITUDE),
+            ATTR_LONGITUDE: self._station.get(ATTR_LONGITUDE),
+            ATTR_EMPTY_SLOTS: self._station.get(ATTR_EMPTY_SLOTS),
+            ATTR_TIMESTAMP: self._station.get(ATTR_TIMESTAMP),
         }
