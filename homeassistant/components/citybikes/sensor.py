@@ -4,12 +4,12 @@ from __future__ import annotations
 import asyncio
 from datetime import timedelta
 import logging
-from typing import TypeVar
+from typing import Any, Generic, TypeVar, Union
 
 import aiohttp
 import async_timeout
-import voluptuous as vol
 import citybikes
+import voluptuous as vol
 
 from homeassistant.components.sensor import (
     ENTITY_ID_FORMAT,
@@ -89,45 +89,58 @@ PLATFORM_SCHEMA = vol.All(
 )
 
 
-
-
-
-
-
 class CityBikesRequestError(Exception):
     """Error to indicate a CityBikes API request has failed."""
 
-Resource = TypeVar('Resource',bound=dict[str, citybikes.Network]|dict[str,citybikes.Station])
 
-class Fetcher:
-    async def fetch(self)->Resource:
+Resource = TypeVar(
+    "Resource", bound=Union[dict[str, citybikes.Network], dict[str, citybikes.Station]]
+)
+
+
+class Fetcher(Generic[Resource]):
+    """An interface for making a call to the CityBikes API with a timeout."""
+
+    async def fetch(self) -> Resource:
         """Perform a request to CityBikes API endpoint, and parse the response."""
         try:
             async with async_timeout.timeout(REQUEST_TIMEOUT):
                 return await self.fetch_impl()
         except (asyncio.TimeoutError, aiohttp.ClientError):
             _LOGGER.error("Could not connect to CityBikes API endpoint")
-        except Exception as e:
-            _LOGGER.error("Received unexpected error from CityBikes client", e)
+        except ValueError:
+            _LOGGER.error("Received non-JSON data from CityBikes API endpoint")
         raise CityBikesRequestError
 
-    async def fetch_impl(self)->Resource:
+    async def fetch_impl(self) -> Resource:
+        """Make a CityBikes API request (must be implemented by children)."""
         raise NotImplementedError()
 
+
 class NetworksFetcher(Fetcher):
-    def __init__(self, client: citybikes.Client):
+    """Fetch networks."""
+
+    def __init__(self, client: citybikes.Client) -> None:
+        """Initialize the NetworksFetcher."""
         self.client = client
 
-    async def fetch_impl(self) ->dict[str,citybikes.Network]:
-        return {n[ATTR_ID]: n for n in self.client.networks.request()}
+    async def fetch_impl(self) -> dict[str, citybikes.Network]:
+        """Refresh networks."""
+        self.client.networks.request()
+        return {n[ATTR_ID]: n for n in self.client.networks}
 
 
 class StationFetcher(Fetcher):
-    def __init__(self,  network: citybikes.Network):
+    """Fetch stations."""
+
+    def __init__(self, network: citybikes.Network) -> None:
+        """Initialize the StationFetcher."""
         self.network = network
 
-    async def fetch_impl(self) -> dict[str, citybikes.Station]:
-        return {s[ATTR_ID]:s for s in self.network.stations.request()}
+    async def fetch_impl(self) -> Any:
+        """Refresh stations on the network."""
+        self.network.stations.request()
+        return {s[ATTR_ID]: s for s in self.network.stations}
 
 
 async def async_setup_platform(
@@ -154,7 +167,9 @@ async def async_setup_platform(
     citybikes_client = citybikes.Client()
 
     # Create a single instance of CityBikesNetworks.
-    networks = hass.data.setdefault(CITYBIKES_NETWORKS, CityBikesNetworks( citybikes_client))
+    networks = hass.data.setdefault(
+        CITYBIKES_NETWORKS, CityBikesNetworks(citybikes_client)
+    )
 
     if not network_id:
         network_id = await networks.get_closest_network_id(latitude, longitude)
@@ -178,9 +193,9 @@ async def async_setup_platform(
 
         if radius > dist or stations_list.intersection((station_id, station_uid)):
             if name:
-                uid = "_".join([network.network_id, name, station_id])
+                uid = "_".join([network_id, name, station_id])
             else:
-                uid = "_".join([network.network_id, station_id])
+                uid = "_".join([network_id, station_id])
             entity_id = async_generate_entity_id(ENTITY_ID_FORMAT, uid, hass=hass)
             devices.append(CityBikesStation(network, station, entity_id))
 
@@ -190,7 +205,7 @@ async def async_setup_platform(
 class CityBikesNetworks:
     """Represent all CityBikes networks."""
 
-    def __init__(self,  client: citybikes.Client)->None:
+    def __init__(self, client: citybikes.Client) -> None:
         """Initialize the networks instance."""
         self.client = client
         self.networks = None
@@ -224,11 +239,11 @@ class CityBikesNetworks:
 class CityBikesNetwork:
     """Thin wrapper around a CityBikes network object."""
 
-    def __init__(self, client:citybikes.Client, network:citybikes.Network)->None:
+    def __init__(self, client: citybikes.Client, network: citybikes.Network) -> None:
         """Initialize the network object."""
         self.client = client
         self.network = network
-        self.stations = {}
+        self.stations: dict[str, citybikes.Station] = {}
         self.ready = asyncio.Event()
 
     async def async_refresh(self, now=None):
