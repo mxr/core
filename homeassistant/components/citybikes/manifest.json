@@ -3,5 +3,6 @@
   "name": "CityBikes",
   "documentation": "https://www.home-assistant.io/integrations/citybikes",
   "codeowners": [],
-  "iot_class": "cloud_polling"
+  "iot_class": "cloud_polling",
+  "requirements": ["python-citybikes-0.2.0"]
 }
