@@ -170,7 +170,7 @@ async def async_setup_platform(
             citybikes_networks.get_closest_network_id, latitude, longitude
         )
         network_id = citybikes_networks.closest_network_id
-
+    breakpoint()
     if network_id not in hass.data[PLATFORM][MONITORED_NETWORKS]:
         network = CityBikesNetwork(
             hass, citybikes_client, citybikes_networks.networks[network_id]
