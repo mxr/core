@@ -30,7 +30,6 @@ from homeassistant.const import (
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import PlatformNotReady
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.entity import async_generate_entity_id
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -92,19 +91,18 @@ Resource = TypeVar(
 class Fetcher(Generic[Resource]):
     """An interface for making a call to the CityBikes API with a timeout."""
 
-    async def fetch(self, hass: HomeAssistant) -> Resource:
+    async def fetch(self) -> Resource:
         """Perform a request to CityBikes API endpoint, and parse the response."""
         try:
-            session = async_get_clientsession(hass)
             async with async_timeout.timeout(REQUEST_TIMEOUT):
-                return await self.fetch_impl(session)
+                return await self.fetch_impl()
         except (asyncio.TimeoutError, aiohttp.ClientError):
             _LOGGER.error("Could not connect to CityBikes API endpoint")
         except ValueError:
             _LOGGER.error("Received non-JSON data from CityBikes API endpoint")
         raise CityBikesRequestError
 
-    async def fetch_impl(self, session: aiohttp.ClientSession) -> Resource:
+    async def fetch_impl(self) -> Resource:
         """Make a CityBikes API request (must be implemented by children)."""
         raise NotImplementedError()
 
@@ -120,11 +118,8 @@ class NetworksFetcher(Fetcher):
         """Initialize the NetworksFetcher."""
         self.client = client
 
-    async def fetch_impl(
-        self, session: aiohttp.ClientSession
-    ) -> dict[str, citybikes.Network]:
+    async def fetch_impl(self) -> dict[str, citybikes.Network]:
         """Refresh networks."""
-        self.client.session = session
         self.client.networks.request()
         return {n[ATTR_ID]: n for n in self.client.networks}
 
@@ -136,11 +131,8 @@ class StationFetcher(Fetcher):
         """Initialize the StationFetcher."""
         self.network = network
 
-    async def fetch_impl(
-        self, session: aiohttp.ClientSession
-    ) -> dict[str, citybikes.Station]:
+    async def fetch_impl(self) -> dict[str, citybikes.Station]:
         """Refresh stations on the network."""
-        self.network.stations.client.session = session
         self.network.stations.request()
         return {s[ATTR_ID]: s for s in self.network.stations}
 
@@ -174,9 +166,10 @@ async def async_setup_platform(
     )
 
     if not network_id:
-        network_id = await citybikes_networks.get_closest_network_id(
-            latitude, longitude
+        await hass.async_add_executor_job(
+            citybikes_networks.get_closest_network_id, latitude, longitude
         )
+        network_id = citybikes_networks.closest_network_id
 
     if network_id not in hass.data[PLATFORM][MONITORED_NETWORKS]:
         network = CityBikesNetwork(
@@ -217,13 +210,14 @@ class CityBikesNetworks:
         self.client = client
         self.networks = None
         self.networks_loading = asyncio.Condition()
+        self.closest_network_id = ""
 
     async def get_closest_network_id(self, latitude, longitude):
         """Return the id of the network closest to provided location."""
         try:
             await self.networks_loading.acquire()
             if self.networks is None:
-                self.networks = await NetworksFetcher(self.client).fetch(self.hass)
+                self.networks = await NetworksFetcher(self.client).fetch()
             result = None
             minimum_dist = None
             for network_id, network in self.networks.items():
@@ -236,6 +230,7 @@ class CityBikesNetworks:
                     minimum_dist = dist
                     result = network_id
 
+            self.closest_network_id = result
             return result
         except CityBikesRequestError as err:
             raise PlatformNotReady from err
@@ -259,7 +254,7 @@ class CityBikesNetwork:
     async def async_refresh(self, now=None):
         """Refresh the state of the network."""
         try:
-            self.stations = await StationFetcher(self.network).fetch(self.hass)
+            self.stations = await StationFetcher(self.network).fetch()
             self.ready.set()
         except CityBikesRequestError as err:
             if now is not None:
