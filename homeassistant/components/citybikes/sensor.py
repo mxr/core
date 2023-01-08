@@ -166,8 +166,8 @@ async def async_setup_platform(
     )
 
     if not network_id:
-        await hass.async_add_executor_job(
-            citybikes_networks.get_closest_network_id, latitude, longitude
+        hass.create_task(
+            citybikes_networks.get_closest_network_id(latitude, longitude)
         )
         network_id = citybikes_networks.closest_network_id
     breakpoint()
