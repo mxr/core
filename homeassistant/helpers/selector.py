@@ -1781,9 +1781,19 @@ class SelectSelectorConfig(BaseSelectorConfig, total=False):
     options: Required[Sequence[SelectOptionDict] | Sequence[str]]
     multiple: bool
     custom_value: bool
+    searchable: bool
     mode: SelectSelectorMode
     translation_key: str
     sort: bool
+
+
+def _validate_select_selector_config(
+    config: SelectSelectorConfig,
+) -> SelectSelectorConfig:
+    """Validate select selector config."""
+    if config.get("custom_value") and config.get("searchable") is False:
+        raise vol.Invalid("searchable cannot be false when custom_value is true")
+    return config
 
 
 @SELECTORS.register("select")
@@ -1792,17 +1802,21 @@ class SelectSelector(Selector[SelectSelectorConfig]):
 
     selector_type = "select"
 
-    CONFIG_SCHEMA = make_selector_config_schema(
-        {
-            vol.Required("options"): vol.All(vol.Any([str], [select_option])),
-            vol.Optional("multiple", default=False): cv.boolean,
-            vol.Optional("custom_value", default=False): cv.boolean,
-            vol.Optional("mode"): vol.All(
-                vol.Coerce(SelectSelectorMode), lambda val: val.value
-            ),
-            vol.Optional("translation_key"): cv.string,
-            vol.Optional("sort", default=False): cv.boolean,
-        }
+    CONFIG_SCHEMA = vol.All(
+        make_selector_config_schema(
+            {
+                vol.Required("options"): vol.All(vol.Any([str], [select_option])),
+                vol.Optional("multiple", default=False): cv.boolean,
+                vol.Optional("custom_value", default=False): cv.boolean,
+                vol.Optional("searchable"): cv.boolean,
+                vol.Optional("mode"): vol.All(
+                    vol.Coerce(SelectSelectorMode), lambda val: val.value
+                ),
+                vol.Optional("translation_key"): cv.string,
+                vol.Optional("sort", default=False): cv.boolean,
+            }
+        ),
+        _validate_select_selector_config,
     )
 
     def __init__(self, config: SelectSelectorConfig) -> None:

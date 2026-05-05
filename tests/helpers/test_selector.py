@@ -1594,6 +1594,20 @@ def test_text_selector_schema(schema, valid_selections, invalid_selections) -> N
             (0, None, ["red"]),
         ),
         (
+            {"options": ["red", "green", "blue"], "searchable": True},
+            ("red", "green", "blue"),
+            ("cat", 0, None, ["red"]),
+        ),
+        (
+            {
+                "options": ["red", "green", "blue"],
+                "multiple": True,
+                "searchable": True,
+            },
+            (["red"], ["green", "blue"], []),
+            ("cat", 0, None, "red"),
+        ),
+        (
             {"options": [], "custom_value": True},
             ("red", "cat"),
             (0, None, ["red"]),
@@ -1624,6 +1638,8 @@ def test_select_selector_schema(schema, valid_selections, invalid_selections) ->
         {"options": [{"hello": "World"}]},
         # Options must all be of the same type
         {"options": ["red", {"value": "green", "label": "Emerald Green"}]},
+        # searchable cannot be disabled when custom_value is enabled
+        {"options": ["red", "green"], "custom_value": True, "searchable": False},
     ],
 )
 def test_select_selector_schema_error(schema) -> None:
